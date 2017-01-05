@@ -17,27 +17,51 @@ namespace ShitProxy
         public static event ProxyDoneEventHandler ProxyDone;
 
         //Todo:Asynchronize
-        public static  void Proxy(string url, TcpClient client)
+        public static void Proxy(string requestPacket, TcpClient client)
         {
-            WebRequest request = WebRequest.Create(url);
-            var socket = client.Client;
-            socket.ReceiveBufferSize = 65536;
-            socket.SendBufferSize = 65536;
-            request.Timeout = 30000;
-            WebResponse response = null;
+            if (string.IsNullOrEmpty(requestPacket))
+            {
+                return;
+            }
+
+            var arr = requestPacket.Replace("Proxy-Connection", "Connection").Split('\n');
+            string url = "";
+            if (arr[0].StartsWith("GET"))
+            {
+                url = arr[0].Split(' ')[1];
+            }
+            else if(arr[0].StartsWith("CONNECT"))
+            {
+                url = "https://" + arr[0].Split(' ', ':')[1];
+            }
+
+            HttpWebRequest request = (HttpWebRequest) HttpWebRequest.Create(url);
+
+            request.Timeout = 65536;
+
+            HttpWebResponse response = null;
+            WebResponse wr = null;
             Stream stream = null;
             try
             {
-                NetworkStream targetStream = new NetworkStream(socket);
-                response = request.GetResponse();
+                response = (HttpWebResponse)request.GetResponse();
                 stream = response.GetResponseStream();
+                Stream targetStream = client.GetStream();
+
+                Console.WriteLine("got response from target Server ");
                 if (stream == null)
                 {
                     throw new Exception("response.GetResponseStream() failed");
                 }
-                //sendto the ip and port
 
+                //Write Headers
+                var httpFirst = "HTTP/1.1 200 OK\r\n";
+                targetStream.Write(Encoding.ASCII.GetBytes(httpFirst), 0, httpFirst.Length);
+                var headerStr = response.Headers.ToString();
+                targetStream.Write(Encoding.ASCII.GetBytes(headerStr), 0, headerStr.Length);
+                //body
                 stream.CopyTo(targetStream);
+
                 if (ProxyDone != null)
                 {
                     ProxyDone(client, new EventArgs());
@@ -53,55 +77,66 @@ namespace ShitProxy
             
         }
 
+        private static void HandleRequest(object state)
+        {
+            var st = (TcpState) state;
+            var client = st.client;
+
+            NetworkStream ns = client.GetStream();
+            StreamReader sr = new StreamReader(ns);
+            string result = "";
+            try {
+                while (sr.Peek() >= 0)
+                {
+                    result = result + sr.ReadLine() + "\n";
+                }
+                //Console.WriteLine(result);
+                Proxy(result.TrimEnd(), client);
+            }
+            catch (Exception e) {
+                Console.WriteLine(e.Message + "---" + e.StackTrace);
+                if (ProxyDone != null) {
+                    ProxyDone(client, new EventArgs());
+                }
+            }
+        }
+
+        private class TcpState
+        {
+            public TcpClient client;
+
+            public TcpState(TcpClient client)
+            {
+                this.client = client;
+            }
+        }
+
         public static void Listen()
         {
             IPAddress localAddr = IPAddress.Parse("0.0.0.0");
             Int32 port = 1314;
             TcpListener listener = new TcpListener(localAddr, port);
             listener.Start();
+            ThreadPool.SetMaxThreads(25, 50);
             while (true)
             {
-                //blocked, wait for a request, a request may fetch one file once a time
+                //blocked, wait for a request
                 TcpClient client = listener.AcceptTcpClient();
-                Console.WriteLine("#new tcp client connected");
-                NetworkStream ns = client.GetStream();
-                StreamReader sr = new StreamReader(ns);
-                string result;
-                try
-                {
-                    //support GET, only handle url
-                    List<string> urls = new List<string>();
-                    while (sr.Peek() >= 0)
-                    {
-                        result = sr.ReadLine();
-                        if (!string.IsNullOrEmpty(result) && result.Contains("HTTP/") && result.StartsWith("GET")) {
-                            string pattern = @"[a-zA-z]+://[^\s]*";
-                            Regex regex = new Regex(pattern, RegexOptions.IgnoreCase);
-                            string url = result.Substring(regex.Match(result).Index, regex.Match(result).Length);
-                            //File.AppendAllText(AppDomain.CurrentDomain.BaseDirectory + "log.txt", url);
-                            urls.Add(url);
-                        }
-                    }
-                    Console.WriteLine(urls.Count);
-                    foreach( string url in urls)
-                    {
-                        Proxy(url, client);
-                    }
-                }
-                catch (Exception e)
-                {
-                    Console.WriteLine(e.Message + "---" + e.StackTrace);
-                    if (ProxyDone != null) {
-                        ProxyDone(client, new EventArgs());
-                    }
-                }
+                client.SendTimeout = 65536;
+                client.ReceiveTimeout = 65536;
+                client.SendBufferSize = 65536;
+                client.ReceiveBufferSize = 65536;
+
+                Console.WriteLine("#new tcp client connected. " + client.Client.RemoteEndPoint);
+                ThreadPool.QueueUserWorkItem(HandleRequest, new TcpState(client));
+                
             }
            
         }
 
         static void Main(string[] args)
         {
-            ProxyDone += new ProxyDoneEventHandler((sender, e) =>
+            ProxyDone += (sender, e) =>
             {
                 if (sender != null)
                 {
@@ -109,10 +144,11 @@ namespace ShitProxy
                     var client = (TcpClient)sender;
                     client.Close();
                 }
-            });
+            };
             Thread th = new Thread(Listen);
             th.Start();
             Console.WriteLine("started proxy");
+            Console.ReadKey();
         }
     }
 }
