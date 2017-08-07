@@ -23,48 +23,42 @@ namespace ShitProxy
             {
                 return;
             }
-
             var arr = requestPacket.Replace("Proxy-Connection", "Connection").Split('\n');
-            string url = "";
-            if (arr[0].StartsWith("GET"))
-            {
-                url = arr[0].Split(' ')[1];
-            }
-            else if(arr[0].StartsWith("CONNECT"))
-            {
-                url = "https://" + arr[0].Split(' ', ':')[1];
-            }
+            string hostAndPort =
+                arr.Where(str => str.StartsWith("HOST", StringComparison.OrdinalIgnoreCase)).ToArray()[0].Split(' ')[1];
 
-            HttpWebRequest request = (HttpWebRequest) HttpWebRequest.Create(url);
+            string host = host = hostAndPort.Split(':')[0];
+            int port = hostAndPort.Contains(':') ? int.Parse(hostAndPort.Split(':')[1]) : 80;
 
-            request.Timeout = 65536;
-
-            HttpWebResponse response = null;
-            WebResponse wr = null;
-            Stream stream = null;
             try
             {
-                response = (HttpWebResponse)request.GetResponse();
-                stream = response.GetResponseStream();
-                Stream targetStream = client.GetStream();
+                TcpClient remoteTcp = new TcpClient(host, port);
+                if (remoteTcp.Connected) {
+                    remoteTcp.SendBufferSize = 4096;
+                    remoteTcp.SendTimeout = 4096;
+                    remoteTcp.ReceiveTimeout = 8192;
+                    remoteTcp.ReceiveBufferSize = 8192;
 
-                Console.WriteLine("got response from target Server ");
-                if (stream == null)
-                {
-                    throw new Exception("response.GetResponseStream() failed");
-                }
+                    NetworkStream ns = remoteTcp.GetStream();
+                    string strToSend = string.Join("\r\n", arr);
+                    //Http header end with a space line;
+                    strToSend += "\r\n\r\n";
+                    byte[] buf = Encoding.ASCII.GetBytes(strToSend);
+                    Console.WriteLine(strToSend);
+                    ns.Write(buf, 0, buf.Length);
+                    
+                    Stream targetStream = client.GetStream();
+                    byte[] recvbuf = new byte[4096];
 
-                //Write Headers
-                var httpFirst = "HTTP/1.1 200 OK\r\n";
-                targetStream.Write(Encoding.ASCII.GetBytes(httpFirst), 0, httpFirst.Length);
-                var headerStr = response.Headers.ToString();
-                targetStream.Write(Encoding.ASCII.GetBytes(headerStr), 0, headerStr.Length);
-                //body
-                stream.CopyTo(targetStream);
+                    int nRead = ns.Read(recvbuf, 0, recvbuf.Length);
+                    while (nRead > 0) {
+                        targetStream.Write(recvbuf, 0, nRead);
+                        nRead = ns.Read(recvbuf, 0, recvbuf.Length);
+                    }
 
-                if (ProxyDone != null)
-                {
-                    ProxyDone(client, new EventArgs());
+                    if (ProxyDone != null) {
+                        ProxyDone(client, new EventArgs());
+                    }
                 }
             }
             catch (Exception e)
@@ -90,7 +84,7 @@ namespace ShitProxy
                 {
                     result = result + sr.ReadLine() + "\n";
                 }
-                //Console.WriteLine(result);
+                Console.WriteLine(result);
                 Proxy(result.TrimEnd(), client);
             }
             catch (Exception e) {
@@ -117,15 +111,15 @@ namespace ShitProxy
             Int32 port = 1314;
             TcpListener listener = new TcpListener(localAddr, port);
             listener.Start();
-            ThreadPool.SetMaxThreads(25, 50);
+            ThreadPool.SetMaxThreads(16, 32);
             while (true)
             {
                 //blocked, wait for a request
                 TcpClient client = listener.AcceptTcpClient();
-                client.SendTimeout = 65536;
-                client.ReceiveTimeout = 65536;
-                client.SendBufferSize = 65536;
-                client.ReceiveBufferSize = 65536;
+                client.SendTimeout = 8192;
+                client.ReceiveTimeout = 2000;
+                client.SendBufferSize = 8192;
+                client.ReceiveBufferSize = 32768;
 
                 Console.WriteLine("#new tcp client connected. " + client.Client.RemoteEndPoint);
                 ThreadPool.QueueUserWorkItem(HandleRequest, new TcpState(client));
